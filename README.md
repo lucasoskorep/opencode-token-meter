@@ -2,6 +2,8 @@
 
 A live **tokens/second** meter for the [opencode](https://opencode.ai) TUI.
 
+![opencode-token-meter showing a live tok/s readout in the prompt status row](assets/screenshot.png)
+
 It renders inline in the prompt's status row — the same cluster as the model
 name and the context-% / `ctrl+p commands` hints — and shows:
 
