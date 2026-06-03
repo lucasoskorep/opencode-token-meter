@@ -1,0 +1,56 @@
+{
+  "name": "opencode-token-meter",
+  "version": "0.2.0",
+  "description": "Live tokens/second meter for the opencode TUI — shown inline in the prompt status row, exact on completion.",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "author": "Lucas Oskorep",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-tui",
+    "tui",
+    "tokens",
+    "tokens-per-second",
+    "tps",
+    "throughput"
+  ],
+  "exports": {
+    "./tui": {
+      "import": "./src/tui.tsx",
+      "config": {
+        "slot": "session_prompt_right",
+        "liveEstimate": true
+      }
+    }
+  },
+  "engines": {
+    "opencode": ">=1.15.0"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lucasoskorep/opencode-token-meter.git"
+  },
+  "homepage": "https://github.com/lucasoskorep/opencode-token-meter#readme",
+  "bugs": {
+    "url": "https://github.com/lucasoskorep/opencode-token-meter/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": ">=1.15.0",
+    "@opencode-ai/sdk": ">=1.15.0",
+    "@opentui/core": "*",
+    "@opentui/solid": "*",
+    "solid-js": "*"
+  }
+}

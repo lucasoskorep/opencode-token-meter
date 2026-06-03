@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": [
+    [
+      "../src/tui.tsx",
+      {
+        "slot": "session_prompt_right",
+        "liveEstimate": true
+      }
+    ]
+  ]
+}

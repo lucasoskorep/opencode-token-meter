@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tgz
+*.log
+.DS_Store
+.pi/
+
+# opencode regenerates these in the local plugin config dir; keep only tui.json
+.opencode/*
+!.opencode/tui.json
