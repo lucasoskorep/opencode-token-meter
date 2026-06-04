@@ -56,20 +56,23 @@ Restart opencode — `tui.json` is read once at startup.
 | `slot`         | string    | `"session_prompt_right"` | Where to render. `"session_prompt_right"` = inline in the prompt status row. `"app_bottom"` = its own line below the prompt. |
 | `liveEstimate` | boolean   | `true`                   | Show the calibrated `~tok/s` estimate while streaming. `false` shows only progress until the exact value at completion. |
 | `charsPerToken`| number    | `0` (auto)               | Force a fixed estimate divisor. `0` self-calibrates from real usage; the cold-start fallback is 4. |
+| `gapMs`        | number    | `1000`                   | Max milliseconds between tokens still counted as active streaming. Longer gaps (a tool/command running, or waiting on you) are not counted. |
 | `label`        | string    | —                        | Optional prefix shown before the readout. |
 
 ## How it measures tokens
 
-**Window — first token to last token.** The rate is measured from the first
-streamed token to the last streamed token of the current response, *not* from
-request start to completion. That excludes time-to-first-token and the trailing
-finalization after the last token. opencode's v2 message model doesn't attach
-per-token timestamps to text/reasoning parts, so the plugin observes the stream
-and records the wall-clock time of the first and last content it sees.
+**Active generation time only.** The plugin accumulates elapsed time *only*
+between consecutive streamed tokens that arrive within `gapMs` (default 1000 ms).
+Any longer gap is treated as idle and isn't counted, so the rate excludes:
 
-**Idle / user-input time is ignored.** Measurement is per generation step (one
-assistant message). Tool execution and permission/user prompts happen *between*
-steps, so that idle time is never inside the measured window.
+- time-to-first-token (nothing counts before the first token),
+- **command/tool execution** (no tokens stream while a tool runs),
+- waiting on you (permission/input prompts), and
+- the trailing finalization after the last token.
+
+Because idle gaps aren't counted, the value **stays frozen while a command/tool
+is running** instead of drifting down. (opencode's v2 message model attaches no
+per-token timestamps, so timing is based on when the plugin observes content.)
 
 **Tokens.** On completion the count is exact (real provider usage:
 `output + reasoning`). While streaming it's estimated from streamed chars,

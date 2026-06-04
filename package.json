@@ -1,6 +1,6 @@
 {
   "name": "opencode-token-meter",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Live tokens/second meter for the opencode TUI — shown inline in the prompt status row, exact on completion.",
   "type": "module",
   "license": "GPL-3.0-or-later",

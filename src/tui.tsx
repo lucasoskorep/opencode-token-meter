@@ -6,30 +6,31 @@
  * status/meta row — the same status cluster as the model name and the
  * context% / "ctrl+p commands" hints (the `session_prompt_right` slot).
  *
- * How the rate is measured:
- *   The window is from the FIRST streamed token to the LAST streamed token of
- *   the current response — not from request start to completion. opencode's v2
- *   message model does not attach per-token timestamps to text/reasoning parts,
- *   so the plugin observes the stream and records the wall-clock time of the
- *   first and last content it sees. This excludes:
- *     - time-to-first-token (the wait before generation starts), and
+ * How the rate is measured — ACTIVE generation time only:
+ *   The plugin watches the stream and accumulates elapsed time *only* between
+ *   consecutive tokens that arrive close together (within `gapMs`). Any longer
+ *   gap is treated as idle and is NOT counted, so the rate excludes:
+ *     - time-to-first-token (nothing is counted before the first token),
+ *     - command/tool execution (no tokens stream while a tool runs), and
+ *     - time spent waiting on the user (permissions, prompts), and
  *     - the trailing finalization after the last token.
+ *   Because idle gaps aren't counted, the displayed value stays frozen while a
+ *   command/tool is running instead of drifting down.
  *
- *   Idle / user-input gaps are excluded too: measurement is per generation step
- *   (one assistant message). Tool execution and permission/user prompts happen
- *   BETWEEN steps, so that idle time never falls inside the measured window.
+ *   (opencode's v2 message model attaches no per-token timestamps, so timing is
+ *   based on when the plugin observes content arrive.)
  *
  *   Tokens:
  *     - On completion  -> EXACT count from real provider usage (output + reasoning).
  *     - While streaming -> estimated from streamed chars, calibrated from the
  *       last completed response's real tokens/char (never a fixed 4; 4 is only
- *       the cold-start fallback). Set liveEstimate=false to skip the estimate
- *       and show only progress until the exact value at finish.
+ *       the cold-start fallback). Set liveEstimate=false to skip the estimate.
  *
  * Registered via `.opencode/tui.json`. Options:
  *   slot          "session_prompt_right" (default, inline in prompt footer) | "app_bottom" (own line below prompt)
  *   liveEstimate  boolean, show estimated tok/s while streaming (default true)
  *   charsPerToken number, force a fixed estimate divisor; 0 = auto-calibrate (default 0)
+ *   gapMs         number, max ms between tokens still counted as active (default 1000)
  *   label         string, optional prefix shown before the readout
  */
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
@@ -40,6 +41,7 @@ type Options = {
   slot?: "app_bottom" | "session_prompt_right"
   liveEstimate?: boolean
   charsPerToken?: number
+  gapMs?: number
   label?: string
 }
 
@@ -48,6 +50,7 @@ type Stat = { kind: "final" | "live" | "raw"; tps: number; tokens: number; chars
 
 const FALLBACK_TOKENS_PER_CHAR = 1 / 4 // cold-start only, before any real usage is known
 const MIN_WINDOW_SECONDS = 0.25 // ignore windows too short to yield a meaningful rate
+const DEFAULT_GAP_MS = 1000 // gaps longer than this (tool/command/idle) are not counted
 
 const oneDp = (n: number) => (Math.round(n * 10) / 10).toFixed(1)
 const int = (n: number) => Math.round(n).toLocaleString()
@@ -71,6 +74,7 @@ function Meter(props: {
   sessionID: () => string | undefined
   liveEstimate: boolean
   charsPerToken: number
+  gapMs: number
   label?: string
   compact?: boolean
 }) {
@@ -84,35 +88,39 @@ function Meter(props: {
 
   const current = createMemo<AssistantMessage | undefined>(() => messages().at(-1))
 
-  // Observed first/last streamed-token wall-clock times for the CURRENT step.
-  // (v2 parts carry no per-token timestamps, so we time what we see streaming.)
-  const [firstByteAt, setFirstByteAt] = createSignal<number | undefined>(undefined)
-  const [lastByteAt, setLastByteAt] = createSignal<number | undefined>(undefined)
+  // Accumulated ACTIVE generation time (ms) for the current response: the sum of
+  // intervals between consecutive tokens that arrived within `gapMs`. Larger gaps
+  // (a command/tool running, or waiting on the user) are skipped, so this clock
+  // pauses whenever the model isn't actively streaming.
+  const [activeMs, setActiveMs] = createSignal(0)
   let trackedID: string | undefined
   let seenChars = 0
-  let firstSeen = false
+  let lastSeenAt: number | undefined
+  let activeAcc = 0
 
   createEffect(() => {
     const m = current()
     const id = m?.id
     const chars = m ? streamedChars(props.api.state.part(m.id)) : 0
-    // Reset timing when a new step (assistant message) becomes current.
+    // Reset when a new response (assistant message) becomes current.
     if (id !== trackedID) {
       trackedID = id
       seenChars = 0
-      firstSeen = false
-      setFirstByteAt(undefined)
-      setLastByteAt(undefined)
+      lastSeenAt = undefined
+      activeAcc = 0
+      setActiveMs(0)
     }
-    // Record a timestamp only when new content actually arrives.
+    // New content arrived: add the interval since the previous token, but only
+    // if it's short enough to be "still streaming" (otherwise it was idle/tool).
     if (chars > seenChars) {
       const now = Date.now()
-      if (!firstSeen && chars > 0) {
-        firstSeen = true
-        setFirstByteAt(now)
+      if (lastSeenAt !== undefined) {
+        const delta = now - lastSeenAt
+        if (delta > 0 && delta <= props.gapMs) activeAcc += delta
       }
-      setLastByteAt(now)
+      lastSeenAt = now
       seenChars = chars
+      setActiveMs(activeAcc)
     }
   })
 
@@ -144,33 +152,30 @@ function Meter(props: {
     const m = current()
     if (!m) return undefined
 
-    const first = firstByteAt()
-    const last = lastByteAt()
-    // Active window = first observed token -> last observed token.
-    const observedSecs = first !== undefined && last !== undefined ? (last - first) / 1000 : undefined
+    const active = activeMs() / 1000 // active generation seconds (idle/tool gaps excluded)
 
-    // Completed step -> exact tok/s from real token usage.
+    // Completed -> exact tok/s from real token usage over the active window.
     const completed = m.time?.completed
     if (completed) {
       const tokens = generatedTokens(m)
       if (tokens <= 0) return undefined
-      let secs = observedSecs
+      let secs = active
       // Fallback when streaming wasn't observed (mounted late / very fast response).
-      if (secs === undefined || secs < MIN_WINDOW_SECONDS) {
+      if (secs < MIN_WINDOW_SECONDS) {
         const created = m.time?.created
         secs = created ? Math.max((completed - created) / 1000, 0.001) : secs
       }
-      if (secs === undefined || secs <= 0) return undefined
+      if (secs < MIN_WINDOW_SECONDS) return undefined
       return { kind: "final", tps: tokens / secs, tokens, chars: 0, secs }
     }
 
-    // Streaming -> need an observed window of first..last token.
-    if (observedSecs === undefined || observedSecs < MIN_WINDOW_SECONDS) return undefined
+    // Streaming -> need enough active time for a meaningful rate.
+    if (active < MIN_WINDOW_SECONDS) return undefined
     const chars = streamedChars(props.api.state.part(m.id))
     if (chars <= 0) return undefined
-    if (!props.liveEstimate) return { kind: "raw", tps: 0, tokens: 0, chars, secs: observedSecs }
+    if (!props.liveEstimate) return { kind: "raw", tps: 0, tokens: 0, chars, secs: active }
     const tokens = chars * tokensPerChar()
-    return { kind: "live", tps: tokens / observedSecs, tokens, chars, secs: observedSecs }
+    return { kind: "live", tps: tokens / active, tokens, chars, secs: active }
   })
 
   return (
@@ -223,6 +228,7 @@ const tui: TuiPlugin = async (api, options) => {
   const slot = opts.slot === "app_bottom" ? "app_bottom" : "session_prompt_right"
   const liveEstimate = opts.liveEstimate !== false
   const charsPerToken = typeof opts.charsPerToken === "number" && opts.charsPerToken > 0 ? opts.charsPerToken : 0
+  const gapMs = typeof opts.gapMs === "number" && opts.gapMs > 0 ? opts.gapMs : DEFAULT_GAP_MS
   const label = typeof opts.label === "string" ? opts.label : undefined
 
   if (slot === "session_prompt_right") {
@@ -236,6 +242,7 @@ const tui: TuiPlugin = async (api, options) => {
               sessionID={() => slotProps.session_id}
               liveEstimate={liveEstimate}
               charsPerToken={charsPerToken}
+              gapMs={gapMs}
               label={label}
               compact
             />
@@ -255,7 +262,14 @@ const tui: TuiPlugin = async (api, options) => {
           return route && route.name === "session" ? (route.params?.sessionID as string | undefined) : undefined
         }
         return (
-          <Meter api={api} sessionID={sessionID} liveEstimate={liveEstimate} charsPerToken={charsPerToken} label={label} />
+          <Meter
+            api={api}
+            sessionID={sessionID}
+            liveEstimate={liveEstimate}
+            charsPerToken={charsPerToken}
+            gapMs={gapMs}
+            label={label}
+          />
         )
       },
     },
